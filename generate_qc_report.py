@@ -332,7 +332,7 @@ def contamination_summary(df, thresholds):
 
 
 # ------------------------------------------------------------------------------
-# MultiQC data processing functions (updated suffixes)
+# MultiQC data processing functions (updated to handle multiple rows)
 # ------------------------------------------------------------------------------
 
 def find_multiqc_files(multiqc_dir, suffix):
@@ -352,8 +352,8 @@ def safe_read_multiqc_file(filepath, expected_cols=None):
     """
     try:
         df = pd.read_csv(filepath, sep='\t', header=0)
-        if len(df) < 2:
-            logger.warning(f"File {filepath} has fewer than 2 rows, skipping.")
+        if len(df) < 1:
+            logger.warning(f"File {filepath} has no data rows, skipping.")
             return None
         if expected_cols and df.shape[1] != expected_cols:
             logger.warning(f"File {filepath} has {df.shape[1]} columns, expected {expected_cols}, skipping.")
@@ -405,33 +405,36 @@ def process_cumulative_coverage(multiqc_dir, thresholds, html_path):
         df = safe_read_multiqc_file(f)
         if df is None:
             continue
-        sample_name = df['Sample'].iloc[1].split('.')[0] if len(df) > 1 else "Unknown"
-        # The second row contains the actual data
-        # Convert values to float using parse_multiqc_value
-        values = [parse_multiqc_value(v) for v in df.iloc[1, 1:]]
-        # Filter out NaN
-        clean_values = [v for v in values if not np.isnan(v)]
-        if not clean_values:
-            logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
-            continue
-        plot_df = pd.DataFrame({
-            'Coverage': np.arange(1, len(clean_values)+1),
-            'Percent': clean_values,
-            'Sample': sample_name
-        })
-        fig.add_trace(go.Scatter(
-            x=plot_df['Coverage'], y=plot_df['Percent'],
-            mode='markers', marker=dict(size=3), name=sample_name
-        ))
+        # Iterate over each sample row (skip header)
+        for idx, row in df.iterrows():
+            sample_name = str(row['Sample'])
+            # Clean sample name (remove .recal if present)
+            sample_name = sample_name.split('.')[0]
+            # Extract values from columns after 'Sample'
+            values = [parse_multiqc_value(row[col]) for col in df.columns[1:]]
+            clean_values = [v for v in values if not np.isnan(v)]
+            if not clean_values:
+                logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
+                continue
+            # Create plot data (coverage from 1 to len(clean_values))
+            plot_df = pd.DataFrame({
+                'Coverage': np.arange(1, len(clean_values)+1),
+                'Percent': clean_values,
+                'Sample': sample_name
+            })
+            fig.add_trace(go.Scatter(
+                x=plot_df['Coverage'], y=plot_df['Percent'],
+                mode='markers', marker=dict(size=3), name=sample_name
+            ))
 
-        # Extract coverage at specific thresholds
-        cov_dict = {'Biosample_id': sample_name}
-        for level in [5,10,15,20,25,30]:
-            # Find row where Coverage == level
-            row = plot_df[plot_df['Coverage'] == level]
-            val = row['Percent'].values[0] if not row.empty else np.nan
-            cov_dict[f'Coverage_at_{level}X'] = val
-        report_data.append(cov_dict)
+            # Extract coverage at specific thresholds
+            cov_dict = {'Biosample_id': sample_name}
+            for level in [5,10,15,20,25,30]:
+                # Find row where Coverage == level
+                row_match = plot_df[plot_df['Coverage'] == level]
+                val = row_match['Percent'].values[0] if not row_match.empty else np.nan
+                cov_dict[f'Coverage_at_{level}X'] = val
+            report_data.append(cov_dict)
 
     if not report_data:
         logger.warning("No valid cumulative coverage data found.")
@@ -470,22 +473,22 @@ def process_coverage_distribution(multiqc_dir, html_path):
         df = safe_read_multiqc_file(f)
         if df is None:
             continue
-        sample_name = df['Sample'].iloc[1].split('.')[0] if len(df) > 1 else "Unknown"
-        # Parse values
-        values = [parse_multiqc_value(v) for v in df.iloc[1, 1:]]
-        clean_values = [v for v in values if not np.isnan(v)]
-        if not clean_values:
-            logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
-            continue
-        plot_df = pd.DataFrame({
-            'Coverage': np.arange(1, len(clean_values)+1),
-            'Percent': clean_values,
-            'Sample': sample_name
-        })
-        fig.add_trace(go.Scatter(
-            x=plot_df['Coverage'], y=plot_df['Percent'],
-            mode='lines', name=sample_name, line=dict(shape='spline', smoothing=1.3)
-        ))
+        for idx, row in df.iterrows():
+            sample_name = str(row['Sample']).split('.')[0]
+            values = [parse_multiqc_value(row[col]) for col in df.columns[1:]]
+            clean_values = [v for v in values if not np.isnan(v)]
+            if not clean_values:
+                logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
+                continue
+            plot_df = pd.DataFrame({
+                'Coverage': np.arange(1, len(clean_values)+1),
+                'Percent': clean_values,
+                'Sample': sample_name
+            })
+            fig.add_trace(go.Scatter(
+                x=plot_df['Coverage'], y=plot_df['Percent'],
+                mode='lines', name=sample_name, line=dict(shape='spline', smoothing=1.3)
+            ))
 
     if len(fig.data) == 0:
         logger.warning("No valid coverage distribution data found.")
@@ -514,16 +517,22 @@ def process_per_contig_coverage(multiqc_dir, thresholds, html_path):
         df = safe_read_multiqc_file(f)
         if df is None:
             continue
-        sample_name = df['Sample'].iloc[1].split('.')[0] if len(df) > 1 else "Unknown"
-        # The file format: first column contig, then coverage values per sample? Actually it's likely wide format.
-        # We'll assume it's a table with Sample column and then contig columns.
-        # Let's reshape: melt to long format.
+        # Melt the DataFrame to long format: each row is a sample-contig combination
         try:
-            melted = df.melt(id_vars=['Sample'], var_name='Contig', value_name='Coverage')
+            # The file should have 'Sample' column and then contig columns
+            id_vars = ['Sample']
+            # All other columns are contigs
+            value_vars = [col for col in df.columns if col != 'Sample']
+            melted = df.melt(id_vars=id_vars, value_vars=value_vars,
+                             var_name='Contig', value_name='Coverage')
+            # Convert coverage to numeric, coercing errors
             melted['Coverage'] = pd.to_numeric(melted['Coverage'], errors='coerce')
             melted.dropna(subset=['Coverage'], inplace=True)
             for _, row in melted.iterrows():
-                all_data.append({'BioSample_id': row['Sample'], 'Contig': row['Contig'], 'Coverage': row['Coverage']})
+                sample_name = str(row['Sample']).split('.')[0]
+                all_data.append({'BioSample_id': sample_name,
+                                 'Contig': row['Contig'],
+                                 'Coverage': row['Coverage']})
         except Exception as e:
             logger.warning(f"Could not parse {f}: {e}")
             continue
@@ -577,26 +586,25 @@ def process_mapping_stats(multiqc_dir, thresholds, html_path):
         df = safe_read_multiqc_file(f, expected_cols=4)  # Expect Sample, mapped, mq0, unmapped
         if df is None:
             continue
-        sample_name = df['Sample'].iloc[1].split('.')[0] if len(df) > 1 else "Unknown"
-        # Extract values: row 1 (index 1) has mapped, MQ0, unmapped
-        try:
-            mapped = df.iloc[1, 1]
-            mq0 = df.iloc[1, 2]
-            unmapped = df.iloc[1, 3]
-            # Convert to float if they are strings
-            mapped = float(mapped) if not isinstance(mapped, (int, float)) else mapped
-            mq0 = float(mq0) if not isinstance(mq0, (int, float)) else mq0
-            unmapped = float(unmapped) if not isinstance(unmapped, (int, float)) else unmapped
-            total = mapped + mq0 + unmapped
-            records.append({
-                'Biosample_id': sample_name,
-                'mapped_percent': (mapped / total) * 100,
-                'mq0_percent': (mq0 / total) * 100,
-                'unmapped_percent': (unmapped / total) * 100
-            })
-        except Exception as e:
-            logger.warning(f"Error parsing mapping stats from {f}: {e}")
-            continue
+        for idx, row in df.iterrows():
+            sample_name = str(row['Sample']).split('.')[0]
+            try:
+                mapped = parse_multiqc_value(row.iloc[1])
+                mq0 = parse_multiqc_value(row.iloc[2])
+                unmapped = parse_multiqc_value(row.iloc[3])
+                if np.isnan(mapped) or np.isnan(mq0) or np.isnan(unmapped):
+                    logger.warning(f"Missing values for {sample_name} in {f}, skipping.")
+                    continue
+                total = mapped + mq0 + unmapped
+                records.append({
+                    'Biosample_id': sample_name,
+                    'mapped_percent': (mapped / total) * 100,
+                    'mq0_percent': (mq0 / total) * 100,
+                    'unmapped_percent': (unmapped / total) * 100
+                })
+            except Exception as e:
+                logger.warning(f"Error parsing mapping stats from {f}: {e}")
+                continue
 
     if not records:
         logger.warning("No valid mapping stats found.")
@@ -653,20 +661,20 @@ def process_base_quality(multiqc_dir, thresholds, html_path):
         df = safe_read_multiqc_file(f)
         if df is None:
             continue
-        sample_name = df['Sample'].iloc[1].split('.')[0] if len(df) > 1 else "Unknown"
-        # Parse values
-        values = [parse_multiqc_value(v) for v in df.iloc[1, 1:]]
-        clean_values = [v for v in values if not np.isnan(v)]
-        if not clean_values:
-            logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
-            continue
-        records.append({
-            'Biosample_id': sample_name,
-            'min_quality': np.min(clean_values),
-            'max_quality': np.max(clean_values),
-            'mean_quality': np.mean(clean_values),
-            'median_quality': np.median(clean_values)
-        })
+        for idx, row in df.iterrows():
+            sample_name = str(row['Sample']).split('.')[0]
+            values = [parse_multiqc_value(row[col]) for col in df.columns[1:]]
+            clean_values = [v for v in values if not np.isnan(v)]
+            if not clean_values:
+                logger.warning(f"No valid numeric values for {sample_name} in {f}, skipping.")
+                continue
+            records.append({
+                'Biosample_id': sample_name,
+                'min_quality': np.min(clean_values),
+                'max_quality': np.max(clean_values),
+                'mean_quality': np.mean(clean_values),
+                'median_quality': np.median(clean_values)
+            })
 
     if not records:
         logger.warning("No valid base quality data found.")
