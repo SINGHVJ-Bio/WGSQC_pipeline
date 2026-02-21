@@ -30,12 +30,14 @@ import configparser
 import json
 import glob
 import re
-from statistics import median, mean, variance, stdev
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import math
+from collections import defaultdict
+import ast
 
 # Configure logging
 logging.basicConfig(
@@ -185,164 +187,25 @@ def load_qc_data(qc_dir, sample_summary_path=None):
 
 
 # ------------------------------------------------------------------------------
-# Summary functions (adapted to work with the combined DataFrame)
+# Helper function for MultiQC file discovery with fallback suffixes
 # ------------------------------------------------------------------------------
 
-def sample_based_summary(df, thresholds):
+def find_multiqc_files_any(multiqc_dir, suffixes):
     """
-    Compute per‑sample summary statistics and outlier status.
-    Returns a DataFrame with one row per sample.
+    Try each suffix in order and return (files_list, used_suffix) for the first suffix that yields matches.
+    If none match, return ([], None).
     """
-    # Identify required columns
-    mean_cov_col = find_column(df, ['Mean_alignment_coverage_over_autosomal_loci'])
-    median_cov_col = find_column(df, ['Median_alignment_coverage_over_autosomal_loci'])
-    pct15_col = find_column(df, ['Percent_autosome_coverage_at_15X'])
-    pct30_col = find_column(df, ['Percent_autosome_coverage_at_30X'])
-    ratio_col = find_column(df, ['Mean_by_Median_autosomal_coverage_ratio_over_region'])
-
-    results = []
-    for sample in df['Biosample_id'].unique():
-        sub = df[df['Biosample_id'] == sample]
-        mean_cov = mean(sub[mean_cov_col])
-        median_cov = round(median(sub[median_cov_col]))
-        pct_15x = round(mean(sub[pct15_col]))
-        pct_30x = round(mean(sub[pct30_col]))
-        mean_median_ratio = mean_cov / median_cov if median_cov else 0
-
-        # Outlier detection
-        outlier_mean = sub[sub[mean_cov_col] < thresholds['autosomal_coverage_cutoff']]['Biosample_id'].unique()
-        outlier_median = sub[sub[median_cov_col] < thresholds['autosomal_coverage_cutoff']]['Biosample_id'].unique()
-        outlier_pct15 = sub[sub[pct15_col] < thresholds['percent_coverage_cutoff']]['Biosample_id'].unique()
-        outlier_pct30 = sub[sub[pct30_col] < thresholds['percent_coverage_cutoff']]['Biosample_id'].unique()
-        outlier_ratio = sub[sub[ratio_col] > thresholds['mean_median_ratio_cutoff']]['Biosample_id'].unique()
-
-        results.append({
-            'Sample': sample,
-            'Mean_alignment_coverage_over_autosomal_loci': mean_cov,
-            'Median_alignment_coverage_over_autosomal_loci': median_cov,
-            'Percent_autosome_coverage_at_15X': pct_15x,
-            'Percent_autosome_coverage_at_30X': pct_30x,
-            'outlier_mean_coverage': list(outlier_mean),
-            'outlier_median_coverage': list(outlier_median),
-            'outlier_pct15': list(outlier_pct15),
-            'outlier_pct30': list(outlier_pct30),
-            'outlier_ratio': list(outlier_ratio),
-            'Status_mean': 'Failed' if len(outlier_mean) else 'Pass',
-            'Status_median': 'Failed' if len(outlier_median) else 'Pass',
-            'Status_pct15': 'Failed' if len(outlier_pct15) else 'Pass',
-            'Status_pct30': 'Failed' if len(outlier_pct30) else 'Pass',
-            'Status_ratio': 'Failed' if len(outlier_ratio) else 'Pass'
-        })
-    return pd.DataFrame(results)
-
-
-def chromosome_based_summary(df, thresholds):
-    """
-    Compute per‑chromosome summary statistics across all samples.
-    Returns a DataFrame with one row per chromosome.
-    """
-    # Identify required columns (same as above)
-    mean_cov_col = find_column(df, ['Mean_alignment_coverage_over_autosomal_loci'])
-    median_cov_col = find_column(df, ['Median_alignment_coverage_over_autosomal_loci'])
-    pct15_col = find_column(df, ['Percent_autosome_coverage_at_15X'])
-    pct30_col = find_column(df, ['Percent_autosome_coverage_at_30X'])
-    ratio_col = find_column(df, ['Mean_by_Median_autosomal_coverage_ratio_over_region'])
-
-    results = []
-    for chrom_num in df['Chrom_num'].unique():
-        sub = df[df['Chrom_num'] == chrom_num]
-        mean_cov = mean(sub[mean_cov_col])
-        median_cov = round(median(sub[median_cov_col]))
-        pct_15x = round(mean(sub[pct15_col]))
-        pct_30x = round(mean(sub[pct30_col]))
-        mean_median_ratio = mean_cov / median_cov if median_cov else 0
-
-        outlier_mean = sub[sub[mean_cov_col] < thresholds['autosomal_coverage_cutoff']]['Chrom'].unique()
-        outlier_median = sub[sub[median_cov_col] < thresholds['autosomal_coverage_cutoff']]['Chrom'].unique()
-        outlier_pct15 = sub[sub[pct15_col] < thresholds['percent_coverage_cutoff']]['Chrom'].unique()
-        outlier_pct30 = sub[sub[pct30_col] < thresholds['percent_coverage_cutoff']]['Chrom'].unique()
-        outlier_ratio = sub[sub[ratio_col] > thresholds['mean_median_ratio_cutoff']]['Chrom'].unique()
-
-        results.append({
-            'Chromosome': f'chr{chrom_num}',
-            'Mean_alignment_coverage_over_autosomal_loci': mean_cov,
-            'Median_alignment_coverage_over_autosomal_loci': median_cov,
-            'Percent_autosome_coverage_at_15X': pct_15x,
-            'Percent_autosome_coverage_at_30X': pct_30x,
-            'outlier_mean_coverage': list(outlier_mean),
-            'outlier_median_coverage': list(outlier_median),
-            'outlier_pct15': list(outlier_pct15),
-            'outlier_pct30': list(outlier_pct30),
-            'outlier_ratio': list(outlier_ratio),
-            'Status_mean': 'Failed' if len(outlier_mean) else 'Pass',
-            'Status_median': 'Failed' if len(outlier_median) else 'Pass',
-            'Status_pct15': 'Failed' if len(outlier_pct15) else 'Pass',
-            'Status_pct30': 'Failed' if len(outlier_pct30) else 'Pass',
-            'Status_ratio': 'Failed' if len(outlier_ratio) else 'Pass'
-        })
-    return pd.DataFrame(results)
-
-
-def contamination_summary(df, thresholds):
-    """
-    Compute per‑sample contamination metrics (Average_autosomal_coverage, freemix, avg_dp).
-    Uses the sample‑level columns that were merged in.
-    """
-    # Check which sample-level columns exist
-    possible_aac = find_column(df, ['Average_autosomal_coverage'])
-    possible_freemix = find_column(df, ['VerifyBamID2_Contamination', 'freemix', 'FREEMIX'])
-    possible_avgdp = find_column(df, ['VerifyBamID2_Average_Depth', 'avg_dp', 'AVG_DP'])
-
-    if not possible_aac and not possible_freemix and not possible_avgdp:
-        logger.warning("No contamination-related columns found in merged data. Skipping contamination summary.")
-        return pd.DataFrame()
-
-    # Deduplicate by sample
-    df_unique = df.drop_duplicates(subset=['Biosample_id']).copy()
-    results = []
-    for _, row in df_unique.iterrows():
-        sample = row['Biosample_id']
-        aac = row[possible_aac] if possible_aac else np.nan
-        freemix = row[possible_freemix] if possible_freemix else np.nan
-        avg_dp = row[possible_avgdp] if possible_avgdp else np.nan
-
-        outlier_aac = aac < thresholds['autosomal_coverage_cutoff'] if not np.isnan(aac) else False
-        outlier_freemix = freemix > thresholds['freemix_cutoff'] if not np.isnan(freemix) else False
-        outlier_avgdp = avg_dp < thresholds['autosomal_coverage_cutoff'] if not np.isnan(avg_dp) else False
-
-        results.append({
-            'Sample': sample,
-            'Average_autosomal_coverage': aac,
-            'freemix': freemix,
-            'avg_dp': avg_dp,
-            'outlier_AAC': sample if outlier_aac else None,
-            'outlier_freemix': sample if outlier_freemix else None,
-            'outlier_avgdp': sample if outlier_avgdp else None,
-            'Status_AAC': 'Failed' if outlier_aac else 'Pass',
-            'Status_freemix': 'Failed' if outlier_freemix else 'Pass',
-            'Status_avgdp': 'Failed' if outlier_avgdp else 'Pass'
-        })
-    contam_df = pd.DataFrame(results)
-    if not contam_df.empty:
-        # Convert outlier columns to lists (for consistency)
-        contam_df['outlier_AAC'] = contam_df['outlier_AAC'].apply(lambda x: [x] if x else [])
-        contam_df['outlier_freemix'] = contam_df['outlier_freemix'].apply(lambda x: [x] if x else [])
-        contam_df['outlier_avgdp'] = contam_df['outlier_avgdp'].apply(lambda x: [x] if x else [])
-    return contam_df
-
-
-# ------------------------------------------------------------------------------
-# MultiQC data processing functions (updated to handle multiple rows)
-# ------------------------------------------------------------------------------
-
-def find_multiqc_files(multiqc_dir, suffix):
-    """Recursively find all files with given suffix in multiqc_dir."""
-    matches = []
-    for root, dirs, files in os.walk(multiqc_dir):
-        for f in files:
-            if f.endswith(suffix):
-                matches.append(os.path.join(root, f))
-    return matches
+    for suffix in suffixes:
+        files = []
+        for root, dirs, fnames in os.walk(multiqc_dir):
+            for f in fnames:
+                if f.endswith(suffix):
+                    files.append(os.path.join(root, f))
+        if files:
+            logger.info(f"Found {len(files)} file(s) with suffix '{suffix}'")
+            return files, suffix
+    logger.warning(f"None of the suffixes {suffixes} found in {multiqc_dir}")
+    return [], None
 
 
 def safe_read_multiqc_file(filepath, expected_cols=None):
@@ -391,11 +254,196 @@ def parse_multiqc_value(val):
     return np.nan
 
 
+# ------------------------------------------------------------------------------
+# Summary functions (adapted to work with the combined DataFrame, using pandas methods to handle NaN)
+# ------------------------------------------------------------------------------
+
+def sample_based_summary(df, thresholds):
+    """
+    Compute per‑sample summary statistics and outlier status.
+    Returns a DataFrame with one row per sample.
+    All calculations use pandas methods with skipna=True to ignore missing values.
+    """
+    # Identify required columns
+    mean_cov_col = find_column(df, ['Mean_alignment_coverage_over_autosomal_loci'])
+    median_cov_col = find_column(df, ['Median_alignment_coverage_over_autosomal_loci'])
+    pct15_col = find_column(df, ['Percent_autosome_coverage_at_15X'])
+    pct30_col = find_column(df, ['Percent_autosome_coverage_at_30X'])
+    ratio_col = find_column(df, ['Mean_by_Median_autosomal_coverage_ratio_over_region'])
+
+    results = []
+    for sample in df['Biosample_id'].unique():
+        sub = df[df['Biosample_id'] == sample]
+
+        # Use pandas methods that skip NaN automatically
+        mean_cov = sub[mean_cov_col].mean(skipna=True)
+        median_cov = sub[median_cov_col].median(skipna=True)
+        # Round only if value is not NaN
+        median_cov = round(median_cov) if not pd.isna(median_cov) else np.nan
+        pct_15x = sub[pct15_col].mean(skipna=True)
+        pct_15x = round(pct_15x) if not pd.isna(pct_15x) else np.nan
+        pct_30x = sub[pct30_col].mean(skipna=True)
+        pct_30x = round(pct_30x) if not pd.isna(pct_30x) else np.nan
+
+        # Avoid division by zero or NaN median
+        if pd.isna(median_cov) or median_cov == 0:
+            mean_median_ratio = np.nan
+        else:
+            mean_median_ratio = mean_cov / median_cov
+
+        # Outlier detection – comparisons with NaN evaluate to False, which is fine
+        outlier_mean = sub[sub[mean_cov_col] < thresholds['autosomal_coverage_cutoff']]['Biosample_id'].unique()
+        outlier_median = sub[sub[median_cov_col] < thresholds['autosomal_coverage_cutoff']]['Biosample_id'].unique()
+        outlier_pct15 = sub[sub[pct15_col] < thresholds['percent_coverage_cutoff']]['Biosample_id'].unique()
+        outlier_pct30 = sub[sub[pct30_col] < thresholds['percent_coverage_cutoff']]['Biosample_id'].unique()
+        outlier_ratio = sub[sub[ratio_col] > thresholds['mean_median_ratio_cutoff']]['Biosample_id'].unique()
+
+        results.append({
+            'Sample': sample,
+            'Mean_alignment_coverage_over_autosomal_loci': mean_cov,
+            'Median_alignment_coverage_over_autosomal_loci': median_cov,
+            'Percent_autosome_coverage_at_15X': pct_15x,
+            'Percent_autosome_coverage_at_30X': pct_30x,
+            'outlier_mean_coverage': list(outlier_mean),
+            'outlier_median_coverage': list(outlier_median),
+            'outlier_pct15': list(outlier_pct15),
+            'outlier_pct30': list(outlier_pct30),
+            'outlier_ratio': list(outlier_ratio),
+            'Status_mean': 'Failed' if len(outlier_mean) else 'Pass',
+            'Status_median': 'Failed' if len(outlier_median) else 'Pass',
+            'Status_pct15': 'Failed' if len(outlier_pct15) else 'Pass',
+            'Status_pct30': 'Failed' if len(outlier_pct30) else 'Pass',
+            'Status_ratio': 'Failed' if len(outlier_ratio) else 'Pass'
+        })
+    return pd.DataFrame(results)
+
+
+def chromosome_based_summary(df, thresholds):
+    """
+    Compute per‑chromosome summary statistics across all samples.
+    Returns a DataFrame with one row per chromosome.
+    All calculations use pandas methods with skipna=True to ignore missing values.
+    """
+    # Identify required columns (same as above)
+    mean_cov_col = find_column(df, ['Mean_alignment_coverage_over_autosomal_loci'])
+    median_cov_col = find_column(df, ['Median_alignment_coverage_over_autosomal_loci'])
+    pct15_col = find_column(df, ['Percent_autosome_coverage_at_15X'])
+    pct30_col = find_column(df, ['Percent_autosome_coverage_at_30X'])
+    ratio_col = find_column(df, ['Mean_by_Median_autosomal_coverage_ratio_over_region'])
+
+    results = []
+    for chrom_num in df['Chrom_num'].unique():
+        sub = df[df['Chrom_num'] == chrom_num]
+
+        mean_cov = sub[mean_cov_col].mean(skipna=True)
+        median_cov = sub[median_cov_col].median(skipna=True)
+        median_cov = round(median_cov) if not pd.isna(median_cov) else np.nan
+        pct_15x = sub[pct15_col].mean(skipna=True)
+        pct_15x = round(pct_15x) if not pd.isna(pct_15x) else np.nan
+        pct_30x = sub[pct30_col].mean(skipna=True)
+        pct_30x = round(pct_30x) if not pd.isna(pct_30x) else np.nan
+
+        if pd.isna(median_cov) or median_cov == 0:
+            mean_median_ratio = np.nan
+        else:
+            mean_median_ratio = mean_cov / median_cov
+
+        outlier_mean = sub[sub[mean_cov_col] < thresholds['autosomal_coverage_cutoff']]['Chrom'].unique()
+        outlier_median = sub[sub[median_cov_col] < thresholds['autosomal_coverage_cutoff']]['Chrom'].unique()
+        outlier_pct15 = sub[sub[pct15_col] < thresholds['percent_coverage_cutoff']]['Chrom'].unique()
+        outlier_pct30 = sub[sub[pct30_col] < thresholds['percent_coverage_cutoff']]['Chrom'].unique()
+        outlier_ratio = sub[sub[ratio_col] > thresholds['mean_median_ratio_cutoff']]['Chrom'].unique()
+
+        results.append({
+            'Chromosome': f'chr{chrom_num}',
+            'Mean_alignment_coverage_over_autosomal_loci': mean_cov,
+            'Median_alignment_coverage_over_autosomal_loci': median_cov,
+            'Percent_autosome_coverage_at_15X': pct_15x,
+            'Percent_autosome_coverage_at_30X': pct_30x,
+            'outlier_mean_coverage': list(outlier_mean),
+            'outlier_median_coverage': list(outlier_median),
+            'outlier_pct15': list(outlier_pct15),
+            'outlier_pct30': list(outlier_pct30),
+            'outlier_ratio': list(outlier_ratio),
+            'Status_mean': 'Failed' if len(outlier_mean) else 'Pass',
+            'Status_median': 'Failed' if len(outlier_median) else 'Pass',
+            'Status_pct15': 'Failed' if len(outlier_pct15) else 'Pass',
+            'Status_pct30': 'Failed' if len(outlier_pct30) else 'Pass',
+            'Status_ratio': 'Failed' if len(outlier_ratio) else 'Pass'
+        })
+    return pd.DataFrame(results)
+
+
+def contamination_summary(df, thresholds):
+    """
+    Compute per‑sample contamination metrics (Average_autosomal_coverage, freemix, avg_dp).
+    Uses the sample‑level columns that were merged in.
+    """
+    # Check which sample-level columns exist
+    possible_aac = find_column(df, ['Average_autosomal_coverage'])
+    possible_freemix = find_column(df, ['VerifyBamID2_Contamination', 'freemix', 'FREEMIX'])
+    possible_avgdp = find_column(df, ['VerifyBamID2_Average_Depth', 'avg_dp', 'AVG_DP'])
+
+    if possible_aac:
+        logger.info(f"Found AAC column: {possible_aac}")
+    if possible_freemix:
+        logger.info(f"Found freemix column: {possible_freemix}")
+    if possible_avgdp:
+        logger.info(f"Found avg_dp column: {possible_avgdp}")
+
+    if not possible_aac and not possible_freemix and not possible_avgdp:
+        logger.warning("No contamination-related columns found in merged data. Skipping contamination summary.")
+        return pd.DataFrame()
+
+    # Deduplicate by sample
+    df_unique = df.drop_duplicates(subset=['Biosample_id']).copy()
+    results = []
+    for _, row in df_unique.iterrows():
+        sample = row['Biosample_id']
+        
+        # Convert to numeric, coercing errors to NaN
+        aac = pd.to_numeric(row[possible_aac], errors='coerce') if possible_aac else np.nan
+        freemix = pd.to_numeric(row[possible_freemix], errors='coerce') if possible_freemix else np.nan
+        avg_dp = pd.to_numeric(row[possible_avgdp], errors='coerce') if possible_avgdp else np.nan
+
+        outlier_aac = aac < thresholds['autosomal_coverage_cutoff'] if not np.isnan(aac) else False
+        outlier_freemix = freemix > thresholds['freemix_cutoff'] if not np.isnan(freemix) else False
+        outlier_avgdp = avg_dp < thresholds['autosomal_coverage_cutoff'] if not np.isnan(avg_dp) else False
+
+        results.append({
+            'Sample': sample,
+            'Average_autosomal_coverage': aac,
+            'freemix': freemix,
+            'avg_dp': avg_dp,
+            'outlier_AAC': sample if outlier_aac else None,
+            'outlier_freemix': sample if outlier_freemix else None,
+            'outlier_avgdp': sample if outlier_avgdp else None,
+            'Status_AAC': 'Failed' if outlier_aac else 'Pass',
+            'Status_freemix': 'Failed' if outlier_freemix else 'Pass',
+            'Status_avgdp': 'Failed' if outlier_avgdp else 'Pass'
+        })
+    contam_df = pd.DataFrame(results)
+    if not contam_df.empty:
+        # Convert outlier columns to lists (for consistency)
+        contam_df['outlier_AAC'] = contam_df['outlier_AAC'].apply(lambda x: [x] if x else [])
+        contam_df['outlier_freemix'] = contam_df['outlier_freemix'].apply(lambda x: [x] if x else [])
+        contam_df['outlier_avgdp'] = contam_df['outlier_avgdp'].apply(lambda x: [x] if x else [])
+    return contam_df
+
+
+# ------------------------------------------------------------------------------
+# MultiQC data processing functions with fallback suffixes
+# ------------------------------------------------------------------------------
+
 def process_cumulative_coverage(multiqc_dir, thresholds, html_path):
-    """Process mosdepth cumulative coverage files (mosdepth-cumcoverage-dist-id.txt)."""
-    files = find_multiqc_files(multiqc_dir, 'mosdepth-cumcoverage-dist-id.txt')
+    """
+    Process mosdepth cumulative coverage files.
+    Tries primary suffix 'mosdepth-cumcoverage-dist-id.txt', then fallback 'mosdepth_cumcov_dist.txt'.
+    """
+    suffixes = ['mosdepth-cumcoverage-dist-id.txt', 'mosdepth_cumcov_dist.txt']
+    files, used_suffix = find_multiqc_files_any(multiqc_dir, suffixes)
     if not files:
-        logger.warning("No cumulative coverage files found (mosdepth-cumcoverage-dist-id.txt).")
+        logger.warning("No cumulative coverage files found.")
         return None, None
 
     fig = go.Figure()
@@ -462,10 +510,15 @@ def process_cumulative_coverage(multiqc_dir, thresholds, html_path):
 
 
 def process_coverage_distribution(multiqc_dir, html_path):
-    """Process mosdepth coverage distribution files (mosdepth-coverage-dist-id.txt)."""
-    files = find_multiqc_files(multiqc_dir, 'mosdepth-coverage-dist-id.txt')
+    """
+    Process mosdepth coverage distribution files.
+    Tries primary suffix 'mosdepth-coverage-dist-id.txt', then fallback 'mosdepth_cov_dist.txt'.
+    Only generates a plot (no TSV report).
+    """
+    suffixes = ['mosdepth-coverage-dist-id.txt', 'mosdepth_cov_dist.txt']
+    files, used_suffix = find_multiqc_files_any(multiqc_dir, suffixes)
     if not files:
-        logger.warning("No coverage distribution files found (mosdepth-coverage-dist-id.txt).")
+        logger.warning("No coverage distribution files found.")
         return
 
     fig = go.Figure()
@@ -505,37 +558,72 @@ def process_coverage_distribution(multiqc_dir, html_path):
 
 
 def process_per_contig_coverage(multiqc_dir, thresholds, html_path):
-    """Process per‑contig coverage files (mosdepth-coverage-per-contig-multi.txt)."""
-    files = find_multiqc_files(multiqc_dir, 'mosdepth-coverage-per-contig-multi.txt')
+    """
+    Process per‑contig coverage files.
+    Tries primary suffix 'mosdepth-coverage-per-contig-multi.txt', then fallback 'mosdepth_perchrom.txt'.
+    Returns a report DataFrame with CV per sample and generates a box plot.
+    """
+    suffixes = ['mosdepth-coverage-per-contig-multi.txt', 'mosdepth_perchrom.txt']
+    files, used_suffix = find_multiqc_files_any(multiqc_dir, suffixes)
     if not files:
-        logger.warning("No per‑contig coverage files found (mosdepth-coverage-per-contig-multi.txt).")
+        logger.warning("No per‑contig coverage files found.")
         return None, None
 
-    # Combine all data into one DataFrame for box plot
-    all_data = []
+    # Helper to safely evaluate tuple strings
+    def safe_literal_eval(val):
+        try:
+            return ast.literal_eval(val)
+        except:
+            return None
+
+    # Collect data per sample, preferring .recal rows
+    sample_contigs = {}  # base sample name -> {contig: coverage, '_source': 'recal' or 'md'}
+
     for f in files:
         df = safe_read_multiqc_file(f)
         if df is None:
             continue
-        # Melt the DataFrame to long format: each row is a sample-contig combination
-        try:
-            # The file should have 'Sample' column and then contig columns
-            id_vars = ['Sample']
-            # All other columns are contigs
-            value_vars = [col for col in df.columns if col != 'Sample']
-            melted = df.melt(id_vars=id_vars, value_vars=value_vars,
-                             var_name='Contig', value_name='Coverage')
-            # Convert coverage to numeric, coercing errors
-            melted['Coverage'] = pd.to_numeric(melted['Coverage'], errors='coerce')
-            melted.dropna(subset=['Coverage'], inplace=True)
-            for _, row in melted.iterrows():
-                sample_name = str(row['Sample']).split('.')[0]
-                all_data.append({'BioSample_id': sample_name,
-                                 'Contig': row['Contig'],
-                                 'Coverage': row['Coverage']})
-        except Exception as e:
-            logger.warning(f"Could not parse {f}: {e}")
-            continue
+        # Assume first column is sample identifier
+        sample_col = df.columns[0]
+        for idx, row in df.iterrows():
+            sample_raw = str(row[sample_col])
+            base = re.sub(r'(\.md|\.recal|-[^.]+|\.[0-9]+)$', '', sample_raw)
+            is_recal = '.recal' in sample_raw
+
+            # Skip if we already have a recal row for this sample
+            if base in sample_contigs and sample_contigs[base].get('_source') == 'recal':
+                continue
+
+            contigs = {}
+            for col in df.columns[1:]:
+                cell = row[col]
+                if pd.isna(cell):
+                    continue
+                tup = safe_literal_eval(cell)
+                if tup and isinstance(tup, tuple) and len(tup) == 2:
+                    contig, coverage = tup
+                    try:
+                        coverage = float(coverage)
+                        contigs[contig] = coverage
+                    except ValueError:
+                        continue
+            if contigs:
+                contigs['_source'] = 'recal' if is_recal else 'md'
+                # Replace if this row has more contigs (likely the recal row)
+                if base not in sample_contigs or len(contigs) > len(sample_contigs[base]):
+                    sample_contigs[base] = contigs
+
+    # Build a long‑format DataFrame for plotting and CV calculation
+    all_data = []
+    for base, contigs in sample_contigs.items():
+        for contig, coverage in contigs.items():
+            if contig == '_source':
+                continue
+            all_data.append({
+                'BioSample_id': base,
+                'Contig': contig,
+                'Coverage': coverage
+            })
 
     if not all_data:
         logger.warning("No valid per‑contig coverage data found.")
@@ -543,7 +631,7 @@ def process_per_contig_coverage(multiqc_dir, thresholds, html_path):
 
     box_df = pd.DataFrame(all_data)
 
-    # Box plot by contig
+    # Box plot by contig (only autosomes for clarity, but keep all for plot)
     fig = px.box(box_df, x='Contig', y='Coverage', color='Contig',
                  title='Average Contig Coverage per Chromosome')
     fig.update_layout(plot_bgcolor='white', showlegend=False)
@@ -551,14 +639,16 @@ def process_per_contig_coverage(multiqc_dir, thresholds, html_path):
         f.write(fig.to_html(full_html=False, include_plotlyjs='cdn'))
 
     # Generate report: per sample, exclude chrX/chrY, compute CV
+    autosomes = {f'chr{i}' for i in range(1, 23)} | {str(i) for i in range(1, 23)}  # handle both 'chr1' and '1'
     report = []
     for sample in box_df['BioSample_id'].unique():
-        sub = box_df[(box_df['BioSample_id'] == sample) &
-                     (~box_df['Contig'].isin(['chrX', 'chrY']))]
-        if len(sub) == 0:
+        sub = box_df[box_df['BioSample_id'] == sample]
+        # Filter to autosomes only (exclude sex chromosomes and any contigs not in autosomes set)
+        autosome_sub = sub[sub['Contig'].isin(autosomes)]
+        if len(autosome_sub) == 0:
             continue
-        mean_cov = sub['Coverage'].mean()
-        std_cov = sub['Coverage'].std()
+        mean_cov = autosome_sub['Coverage'].mean()
+        std_cov = autosome_sub['Coverage'].std()
         cv = (std_cov / mean_cov) * 100 if mean_cov else np.nan
         status_dict = {}
         for cutoff in thresholds['cv_cutoffs']:
@@ -576,7 +666,7 @@ def process_per_contig_coverage(multiqc_dir, thresholds, html_path):
 
 def process_mapping_stats(multiqc_dir, thresholds, html_path):
     """Process samtools alignment stats files (samtools_alignment_plot.txt)."""
-    files = find_multiqc_files(multiqc_dir, 'samtools_alignment_plot.txt')
+    files = find_multiqc_files_any(multiqc_dir, ['samtools_alignment_plot.txt'])[0]
     if not files:
         logger.warning("No mapping stats files found (samtools_alignment_plot.txt).")
         return None
@@ -635,23 +725,90 @@ def process_mapping_stats(multiqc_dir, thresholds, html_path):
 
 def process_insert_stats(multiqc_dir, html_path):
     """
-    Process insert size stats – originally used samtools_stats.txt, but that file is not present.
-    Instead, we look for fastp-insert-size-plot.txt and parse it if available.
-    If not found, skip and log a warning.
+    Process insert size stats from fastp-insert-size-plot.txt.
+    Computes mean and standard deviation of insert size per sample.
     """
-    files = find_multiqc_files(multiqc_dir, 'fastp-insert-size-plot.txt')
+    files = find_multiqc_files_any(multiqc_dir, ['fastp-insert-size-plot.txt'])[0]
     if not files:
         logger.warning("No insert size files found (fastp-insert-size-plot.txt). Skipping insert stats.")
         return None
 
-    # We'll attempt to parse fastp insert size plot (format may vary). For now, skip.
-    logger.info("fastp-insert-size-plot.txt found but parsing not implemented. Skipping insert stats.")
-    return None
+    # The file format: header with sample name and insert sizes as integers,
+    # rows with sample name and fractions (as strings like "0.123" or "(0,0.123)").
+    sample_stats = defaultdict(list)  # sample -> list of (mean, std) per lane/read
+
+    for f in files:
+        df = safe_read_multiqc_file(f)
+        if df is None:
+            continue
+        # Determine insert size columns (all except first column)
+        insert_cols = [col for col in df.columns if col != df.columns[0]]
+        # Convert insert size column names to integers (they should be numeric)
+        insert_sizes = []
+        for col in insert_cols:
+            try:
+                insert_sizes.append(int(col))
+            except ValueError:
+                # If column name is not an integer, skip it (maybe it's a metadata column)
+                continue
+        if not insert_sizes:
+            logger.warning(f"No numeric insert size columns found in {f}, skipping.")
+            continue
+
+        for idx, row in df.iterrows():
+            sample_lane = str(row[df.columns[0]])
+            sample = re.sub(r'(-L001|-[LR][0-9]+).*', '', sample_lane)  # strip lane info
+            fractions = []
+            for col in insert_cols:
+                val = parse_multiqc_value(row[col])
+                if not np.isnan(val):
+                    fractions.append(val)
+                else:
+                    fractions.append(0.0)
+            if fractions and sum(fractions) > 0:
+                total = sum(fractions)
+                norm = [f/total for f in fractions]
+                mean = sum(isize * f for isize, f in zip(insert_sizes, norm))
+                variance = sum(f * (isize - mean)**2 for isize, f in zip(insert_sizes, norm))
+                std = math.sqrt(variance)
+                sample_stats[sample].append((mean, std))
+
+    if not sample_stats:
+        logger.warning("No valid insert size data found.")
+        return None
+
+    # Average across lanes/reads for each sample
+    result = []
+    for sample, stats_list in sample_stats.items():
+        means = [m for m, _ in stats_list]
+        stds = [s for _, s in stats_list]
+        result.append({
+            'Biosample_id': sample,
+            'insert_size_mean': sum(means) / len(means),
+            'insert_size_std': sum(stds) / len(stds)
+        })
+
+    df_insert = pd.DataFrame(result)
+
+    # Plot histogram-like distribution? For now, just bar plot of mean and std.
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=df_insert['Biosample_id'], y=df_insert['insert_size_mean'],
+                         name='Mean Insert Size'), secondary_y=False)
+    fig.add_trace(go.Scatter(x=df_insert['Biosample_id'], y=df_insert['insert_size_std'],
+                             mode='lines+markers', name='Std Dev'), secondary_y=True)
+    fig.update_layout(title='Insert Size Statistics', plot_bgcolor='white')
+    fig.update_xaxes(title_text='Sample')
+    fig.update_yaxes(title_text='Mean Insert Size (bp)', secondary_y=False)
+    fig.update_yaxes(title_text='Standard Deviation (bp)', secondary_y=True)
+    with open(html_path, 'a') as f:
+        f.write(fig.to_html(full_html=False, include_plotlyjs='cdn'))
+
+    return df_insert
 
 
 def process_base_quality(multiqc_dir, thresholds, html_path):
     """Process per‑base sequence quality files (fastqc_per_base_sequence_quality_plot.txt)."""
-    files = find_multiqc_files(multiqc_dir, 'fastqc_per_base_sequence_quality_plot.txt')
+    files = find_multiqc_files_any(multiqc_dir, ['fastqc_per_base_sequence_quality_plot.txt'])[0]
     if not files:
         logger.warning("No base quality files found (fastqc_per_base_sequence_quality_plot.txt).")
         return None

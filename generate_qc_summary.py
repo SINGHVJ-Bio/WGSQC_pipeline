@@ -32,11 +32,17 @@ def parse_multiqc_general_stats(file_path):
     """
     Parse multiqc_general_stats.txt, group rows by base sample name,
     and return a dict sample -> {metric: value} for duplication and mapping percentages.
-    We prefer rows ending with '.md' over '.recal' for mapping stats.
+    Tries multiple possible column name patterns to accommodate different MultiQC versions.
+    Prints a warning if no expected columns are found.
     """
     samples = defaultdict(dict)
+    found_any = False
+
     with open(file_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f, delimiter='\t')
+        # Uncomment next line to see actual column names in your file
+        # print("Header:", reader.fieldnames)
+
         for row in reader:
             sample_raw = row.get('Sample', '')
             is_md = '.md' in sample_raw
@@ -44,35 +50,95 @@ def parse_multiqc_general_stats(file_path):
             base = re.sub(r'(\.md|\.recal|-[^.]+|\.[0-9]+)$', '', sample_raw)
 
             if base not in samples or (is_md and not samples[base].get('_prefer_md')):
-                # Picard duplication
-                dup = row.get('Picard: Mark Duplicates_mqc-generalstats-picard_mark_duplicates-PERCENT_DUPLICATION')
+                # --- Picard duplication: try multiple possible column names ---
+                dup = None
+                possible_dup_cols = [
+                    'picard_mark_duplicates-PERCENT_DUPLICATION',
+                    'Picard: Mark Duplicates_mqc-generalstats-picard_mark_duplicates-PERCENT_DUPLICATION',
+                    'PERCENT_DUPLICATION',
+                    'Mark Duplicates_mqc-generalstats-picard_mark_duplicates-PERCENT_DUPLICATION'
+                ]
+                for col in possible_dup_cols:
+                    if col in row and row[col] and row[col].strip():
+                        dup = row[col]
+                        break
                 if dup:
-                    samples[base]['percent_duplication'] = float(dup)
+                    try:
+                        samples[base]['percent_duplication'] = float(dup)
+                        found_any = True
+                    except ValueError:
+                        pass
 
-                # Samtools mapping percentages
-                mapped_pct = row.get('Samtools: stats_mqc-generalstats-samtools_stats-reads_mapped_percent')
+                # --- Samtools percent mapped ---
+                mapped_pct = None
+                possible_mapped_cols = [
+                    'samtools_stats-reads_mapped_percent',
+                    'Samtools: stats_mqc-generalstats-samtools_stats-reads_mapped_percent',
+                    'reads_mapped_percent'
+                ]
+                for col in possible_mapped_cols:
+                    if col in row and row[col] and row[col].strip():
+                        mapped_pct = row[col]
+                        break
                 if mapped_pct:
-                    samples[base]['percent_mapped'] = float(mapped_pct)
-                properly_paired = row.get('Samtools: stats_mqc-generalstats-samtools_stats-reads_properly_paired_percent')
+                    try:
+                        samples[base]['percent_mapped'] = float(mapped_pct)
+                        found_any = True
+                    except ValueError:
+                        pass
+
+                # --- Samtools percent properly paired ---
+                properly_paired = None
+                possible_paired_cols = [
+                    'samtools_stats-reads_properly_paired_percent',
+                    'Samtools: stats_mqc-generalstats-samtools_stats-reads_properly_paired_percent',
+                    'reads_properly_paired_percent'
+                ]
+                for col in possible_paired_cols:
+                    if col in row and row[col] and row[col].strip():
+                        properly_paired = row[col]
+                        break
                 if properly_paired:
-                    samples[base]['percent_properly_paired'] = float(properly_paired)
+                    try:
+                        samples[base]['percent_properly_paired'] = float(properly_paired)
+                        found_any = True
+                    except ValueError:
+                        pass
 
                 if is_md:
                     samples[base]['_prefer_md'] = True
+
+    if not found_any:
+        print(f"Warning: No expected columns found in {file_path}. Check the column names.")
+
     return samples
 
+
 def parse_samtools_alignment_plot(file_path):
-    """Parse samtools_alignment_plot.txt and return total mapped reads per sample."""
+    """
+    Parse samtools_alignment_plot.txt and return total mapped reads per sample.
+    Values may be given as floats (e.g., '908495943.0'), so we convert via float.
+    """
     data = {}
     with open(file_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f, delimiter='\t')
         for row in reader:
             sample_raw = row['Sample']
             sample = re.sub(r'(\.md|\.recal|-[^.]+|\.[0-9]+)$', '', sample_raw)
-            mapped_mq0 = int(row.get('Mapped (with MQ>0)', 0))
-            mq0 = int(row.get('MQ0', 0))
+            # Use float conversion to handle possible decimal strings, then cast to int
+            mapped_mq0_str = row.get('Mapped (with MQ>0)', '0')
+            mq0_str = row.get('MQ0', '0')
+            try:
+                mapped_mq0 = int(float(mapped_mq0_str))
+            except ValueError:
+                mapped_mq0 = 0
+            try:
+                mq0 = int(float(mq0_str))
+            except ValueError:
+                mq0 = 0
             data[sample] = mapped_mq0 + mq0
     return data
+
 
 def parse_autosomal_coverage_samples(file_path):
     """
@@ -93,6 +159,7 @@ def parse_autosomal_coverage_samples(file_path):
             }
     return data
 
+
 def parse_contamination_report(file_path):
     """Parse Samples_Contamination_report.tsv including statuses."""
     data = {}
@@ -109,6 +176,7 @@ def parse_contamination_report(file_path):
             }
     return data
 
+
 def parse_base_quality(file_path):
     """Parse base_quality_report.tsv and average R1/R2 for each sample."""
     sample_quals = defaultdict(list)
@@ -120,6 +188,7 @@ def parse_base_quality(file_path):
             mean_q = float(row['mean_quality'])
             sample_quals[sample].append(mean_q)
     return {s: {'mean_base_quality': sum(vals)/len(vals)} for s, vals in sample_quals.items()}
+
 
 def parse_fastp_insert_size(file_path):
     """
@@ -160,6 +229,7 @@ def parse_fastp_insert_size(file_path):
         }
     return result
 
+
 # ------------------------------------------------------------------------------
 # New parsers for the missing metrics
 # ------------------------------------------------------------------------------
@@ -188,6 +258,7 @@ def parse_cumulative_coverage(file_path):
                     '_prefer_md': is_md
                 }
     return samples
+
 
 def parse_per_contig_coverage(file_path):
     """
@@ -234,6 +305,7 @@ def parse_per_contig_coverage(file_path):
         # else skip (should not happen for recal rows)
     return result
 
+
 def parse_qc_metrics_all(file_path):
     """
     Parse QC_metricses_data_all_samples.tsv.
@@ -251,6 +323,7 @@ def parse_qc_metrics_all(file_path):
                 'mean_median_ratio': float(row['Mean_by_Median_autosomal_coverage_ratio_over_region'])
             }
     return data
+
 
 # ------------------------------------------------------------------------------
 # Main routine
@@ -276,7 +349,7 @@ def main():
     try:
         qc_output_dir = config.get('Paths', 'qc_output_dir')
         multiqc_data_dir = config.get('Paths', 'multiqc_data_dir')
-        qc_metrics_dir = config.get('Paths', 'qc_metrics_dir')   # new
+        qc_metrics_dir = config.get('Paths', 'qc_metrics_dir')
         output_file = config.get('Paths', 'output_file')
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         raise KeyError("Missing section or key in config file. Ensure [Paths] contains "
@@ -369,21 +442,25 @@ def main():
 
     # --------------------------------------------------------------------------
     # Define metrics with pass/fail evaluation and source file
+    # Each entry now includes a "type_category" field for the new Type column.
     # --------------------------------------------------------------------------
     metric_defs = [
+        # Depth
         {
             "group": "Depth",
             "type": "Mosdepth Median coverage",
+            "type_category": "Average coverage per contig",
             "source": "Median_alignment_coverage_over_autosomal_loci (Autosomal_Coverage_Samples)",
             "source_file": "qc_output/Autosomal_Coverage_Samples_report.tsv",
             "threshold": "Not specified (all pass)",
             "key": "median_coverage",
             "fmt": lambda v: f"{min(v):.0f} – {max(v):.0f}",
-            "pass_eval": lambda val, status_dict: True   # all pass
+            "pass_eval": lambda val, status_dict: True
         },
         {
             "group": "Depth",
             "type": "Mosdepth Mean coverage",
+            "type_category": "Average coverage per contig",
             "source": "Mean_alignment_coverage_over_autosomal_loci (Autosomal_Coverage_Samples)",
             "source_file": "qc_output/Autosomal_Coverage_Samples_report.tsv",
             "threshold": "Not specified (all pass)",
@@ -394,6 +471,7 @@ def main():
         {
             "group": "Depth",
             "type": "VerifyBAMID average depth",
+            "type_category": "Average coverage per contig",
             "source": "avg_dp (Samples_Contamination)",
             "source_file": "qc_output/Samples_Contamination_report.tsv",
             "threshold": "Not specified (all pass)",
@@ -401,9 +479,11 @@ def main():
             "fmt": lambda v: f"{min(v):.1f} – {max(v):.1f}",
             "pass_eval": lambda val, status_dict: True
         },
+        # Coverage
         {
             "group": "Coverage",
             "type": "Mean autosome coverage",
+            "type_category": "Average coverage per contig",
             "source": "Average_autosomal_coverage (Samples_Contamination)",
             "source_file": "qc_output/Samples_Contamination_report.tsv",
             "threshold": "Not specified (all pass)",
@@ -414,6 +494,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Percent autosomes covered at 30X",
+            "type_category": "Percentage autosome coverage",
             "source": "Percent_autosome_coverage_at_30X (Autosomal_Coverage_Samples)",
             "source_file": "qc_output/Autosomal_Coverage_Samples_report.tsv",
             "threshold": ">90% (typical)",
@@ -424,6 +505,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Percent autosomes covered at 15X",
+            "type_category": "Percentage autosome coverage",
             "source": "Percent_autosome_coverage_at_15X (Autosomal_Coverage_Samples)",
             "source_file": "qc_output/Autosomal_Coverage_Samples_report.tsv",
             "threshold": ">98%",
@@ -431,10 +513,11 @@ def main():
             "fmt": lambda v: f"{min(v):.0f}% – {max(v):.0f}%",
             "pass_eval": lambda val, status_dict: True
         },
-        # New cumulative coverage rows
+        # Cumulative coverage rows
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 5X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_5X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -445,6 +528,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 10X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_10X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -455,6 +539,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 15X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_15X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -465,6 +550,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 20X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_20X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -475,6 +561,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 25X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_25X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -485,6 +572,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Cumulative coverage at 30X (genome-wide)",
+            "type_category": "Cumulative coverage distribution",
             "source": "Coverage_at_30X (Cumulative_Coverage_Samples_report.tsv)",
             "source_file": "qc_output/Cumulative_Coverage_Samples_report.tsv",
             "threshold": "Not specified",
@@ -495,6 +583,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Mean/Median autosome coverage ratio",
+            "type_category": "Mean median ratio of autosome coverage",
             "source": "Mean_by_Median_autosomal_coverage_ratio_over_region (QC_metricses_data_all_samples.tsv)",
             "source_file": "QC_metrics/QC_metricses_data_all_samples.tsv",
             "threshold": "Not specified",
@@ -505,6 +594,7 @@ def main():
         {
             "group": "Coverage",
             "type": "Chromosome coverage imbalance (CV)",
+            "type_category": "Chromosome coverage imbalance",
             "source": "mosdepth-coverage-per-contig-multi.txt (autosomes)",
             "source_file": "multiqc_data/mosdepth-coverage-per-contig-multi.txt",
             "threshold": "<0.1",
@@ -512,9 +602,11 @@ def main():
             "fmt": lambda v: f"{min(v):.4f} – {max(v):.4f}",
             "pass_eval": lambda val, status_dict: val < 0.1
         },
+        # Alignment and preprocessing
         {
             "group": "Alignment and preprocessing",
             "type": "% Duplication",
+            "type_category": "Percent reads properly paired",   # grouped under alignment
             "source": "Picard: Mark Duplicates PERCENT_DUPLICATION (multiqc_general_stats.txt)",
             "source_file": "multiqc_data/multiqc_general_stats.txt",
             "threshold": "<20%",
@@ -525,16 +617,18 @@ def main():
         {
             "group": "Alignment and preprocessing",
             "type": "Reads mapped",
+            "type_category": "Percent reads properly paired",   # grouped under alignment
             "source": "Samtools alignment plot (Mapped with MQ>0 + MQ0)",
             "source_file": "multiqc_data/samtools_alignment_plot.txt",
             "threshold": "–",
             "key": "reads_mapped",
             "fmt": lambda v: f"{min(v)/1e6:.0f} – {max(v)/1e6:.0f} million reads",
-            "pass_eval": lambda val, status_dict: True   # no threshold given
+            "pass_eval": lambda val, status_dict: True
         },
         {
             "group": "Alignment and preprocessing",
             "type": "% Mapped",
+            "type_category": "Percent reads properly paired",   # grouped under alignment
             "source": "Samtools reads_mapped_percent (multiqc_general_stats.txt, .md/.recal)",
             "source_file": "multiqc_data/multiqc_general_stats.txt",
             "threshold": ">95%",
@@ -545,6 +639,7 @@ def main():
         {
             "group": "Alignment and preprocessing",
             "type": "% Reads properly paired",
+            "type_category": "Percent reads properly paired",
             "source": "Samtools reads_properly_paired_percent (multiqc_general_stats.txt, .md/.recal)",
             "source_file": "multiqc_data/multiqc_general_stats.txt",
             "threshold": ">90%",
@@ -555,6 +650,7 @@ def main():
         {
             "group": "Alignment and preprocessing",
             "type": "Insert size standard deviation",
+            "type_category": "Insert size standard deviation",
             "source": "Derived from fastp-insert-size-plot.txt",
             "source_file": "multiqc_data/fastp-insert-size-plot.txt",
             "threshold": "–",
@@ -565,6 +661,7 @@ def main():
         {
             "group": "Alignment and preprocessing",
             "type": "Mean insert size",
+            "type_category": "Mean insert size",
             "source": "Derived from fastp-insert-size-plot.txt",
             "source_file": "multiqc_data/fastp-insert-size-plot.txt",
             "threshold": "–",
@@ -572,9 +669,11 @@ def main():
             "fmt": lambda v: f"{min(v):.0f} – {max(v):.0f} bp",
             "pass_eval": lambda val, status_dict: True
         },
+        # Cross contamination
         {
             "group": "Cross contamination",
             "type": "Cross contamination (freemix)",
+            "type_category": "Sample Contamination",
             "source": "freemix (Samples_Contamination)",
             "source_file": "qc_output/Samples_Contamination_report.tsv",
             "threshold": "<0.05",
@@ -582,9 +681,11 @@ def main():
             "fmt": lambda v: f"{min(v):.2e} – {max(v):.2e}",
             "pass_eval": lambda val, status_dict: status_dict.get('status_freemix', '') == 'Pass'
         },
+        # Sequence quality
         {
             "group": "Sequence quality",
             "type": "Mean base quality (Phred score)",
+            "type_category": "Base quality (Phred score)",
             "source": "mean_quality (base_quality_report)",
             "source_file": "qc_output/base_quality_report.tsv",
             "threshold": ">30",
@@ -633,6 +734,7 @@ def main():
 
         row = {
             'QC Group': mdef['group'],
+            'Type': mdef['type_category'],          # new column
             'QC Type': mdef['type'],
             'Metric (from report)': mdef['source'],
             'Source File': mdef.get('source_file', ''),
@@ -646,9 +748,10 @@ def main():
         }
         output_rows.append(row)
 
-    # Add a special row for Per Sequence Quality (already covered by mean)
+    # Add a placeholder row for Per Sequence Quality (already covered by mean quality)
     output_rows.append({
         'QC Group': 'Sequence quality',
+        'Type': 'Base quality (Phred score)',
         'QC Type': 'Per Sequence Quality',
         'Metric (from report)': 'Covered by mean quality above',
         'Source File': '',
@@ -663,9 +766,9 @@ def main():
 
     # Write CSV with UTF-8 BOM
     fieldnames = [
-        'QC Group', 'QC Type', 'Metric (from report)', 'Source File', 'Expected Threshold',
-        'Observed Value (range)', 'Pass Count', 'Fail Count', 'Total Samples',
-        'Pass %', 'Fail %'
+        'QC Group', 'Type', 'QC Type', 'Metric (from report)', 'Source File',
+        'Expected Threshold', 'Observed Value (range)', 'Pass Count', 'Fail Count',
+        'Total Samples', 'Pass %', 'Fail %'
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:

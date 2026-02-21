@@ -86,32 +86,93 @@ def read_verifybamid_results(file_path):
 
 def compute_sample_summary(merged_df, verify_data, sample_id):
     """
-    Compute summary statistics from merged per-chromosome QC data.
-    Matches the original combine_JSONs logic.
+    Compute sample-level summary statistics from per-chromosome QC data.
+    Handles inconsistencies: trailing colons, duplicate columns, NaNs, missing columns.
     """
-    # Original combined metrics
-    total_bases_aligned = merged_df['Total_number_of_bases_aligned'].sum()
-    total_bases = merged_df['Total_number_of_bases'].sum()
-    # Avoid division by zero
-    avg_auto_cov = total_bases_aligned / total_bases if total_bases else 0
+    # ---- 1. Clean column names: remove trailing colons ----
+    merged_df.columns = merged_df.columns.str.replace(r':$', '', regex=True)
+    # Remove duplicate column names (keep first) to avoid later ambiguity
+    merged_df = merged_df.loc[:, ~merged_df.columns.duplicated(keep='first')]
 
-    # Median of per-chromosome median coverages
-    median_cov_list = merged_df["Median_alignment_coverage_over_autosomal_loci"]
-    median_val = round(median(median_cov_list))
-    mean_val = mean(median_cov_list)
-    mean_by_median = mean_val / median_val if median_val else 0
+    # ---- 2. Deduplicate by chromosome (keep first valid row) ----
+    if 'Chrom' in merged_df.columns:
+        merged_df = merged_df.drop_duplicates(subset=['Chrom'], keep='first')
 
-    # Percentages (mean of per-chromosome percentages)
-    pct_5x = round(mean(merged_df["Percent_autosome_coverage_at_5X"]))
-    pct_10x = round(mean(merged_df["Percent_autosome_coverage_at_10X"]))
-    pct_15x = round(mean(merged_df["Percent_autosome_coverage_at_15X"]))
-    pct_20x = round(mean(merged_df["Percent_autosome_coverage_at_20X"]))
-    pct_25x = round(mean(merged_df["Percent_autosome_coverage_at_25X"]))
-    pct_30x = round(mean(merged_df["Percent_autosome_coverage_at_30X"]))
+    # ---- 3. Ensure required columns are numeric, coercing errors to NaN ----
+    numeric_cols = [
+        'Total_number_of_bases_aligned',
+        'Total_number_of_bases',
+        'Median_alignment_coverage_over_autosomal_loci',
+        'Mean_alignment_coverage_over_autosomal_loci',
+        'Percent_autosome_coverage_at_5X',
+        'Percent_autosome_coverage_at_10X',
+        'Percent_autosome_coverage_at_15X',
+        'Percent_autosome_coverage_at_20X',
+        'Percent_autosome_coverage_at_25X',
+        'Percent_autosome_coverage_at_30X',
+        'Bases_covered_5x',
+        'Bases_covered_10x',
+        'Bases_covered_15x',
+        'Bases_covered_20x',
+        'Bases_covered_25x',
+        'Bases_covered_30x',
+    ]
+    for col in numeric_cols:
+        if col in merged_df.columns:
+            try:
+                merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce')
+            except TypeError as e:
+                # If conversion fails (e.g., because column is not a Series), create NaN column
+                logger.warning(f"Could not convert column '{col}' to numeric for sample {sample_id}: {e}")
+                merged_df[col] = np.nan
+        else:
+            merged_df[col] = np.nan
 
+    # ---- 4. Compute summary statistics ----
+    # Total bases aligned (sum, skip NaN)
+    total_bases_aligned = merged_df['Total_number_of_bases_aligned'].sum(skipna=True)
+    total_bases = merged_df['Total_number_of_bases'].sum(skipna=True)
+    avg_auto_cov = total_bases_aligned / total_bases if total_bases and total_bases > 0 else 0
+
+    # Median of per-chromosome median coverages (drop NaN)
+    median_cov_vals = merged_df['Median_alignment_coverage_over_autosomal_loci'].dropna()
+    if not median_cov_vals.empty:
+        median_val = round(median_cov_vals.median())   # use pandas median (handles NaN already)
+        mean_val = median_cov_vals.mean()
+        mean_by_median = mean_val / median_val if median_val else 0
+    else:
+        median_val = 0
+        mean_val = 0
+        mean_by_median = 0
+
+    # Percentages: mean of per-chromosome percentages (drop NaN)
+    def safe_mean(col):
+        vals = merged_df[col].dropna()
+        return round(vals.mean()) if not vals.empty else 0
+
+    pct_5x  = safe_mean('Percent_autosome_coverage_at_5X')
+    pct_10x = safe_mean('Percent_autosome_coverage_at_10X')
+    pct_15x = safe_mean('Percent_autosome_coverage_at_15X')
+    pct_20x = safe_mean('Percent_autosome_coverage_at_20X')
+    pct_25x = safe_mean('Percent_autosome_coverage_at_25X')
+    pct_30x = safe_mean('Percent_autosome_coverage_at_30X')
+
+    # Bases covered sums (skip NaN)
+    bases_5x  = merged_df['Bases_covered_5x'].sum(skipna=True)
+    bases_10x = merged_df['Bases_covered_10x'].sum(skipna=True)
+    bases_15x = merged_df['Bases_covered_15x'].sum(skipna=True)
+    bases_20x = merged_df['Bases_covered_20x'].sum(skipna=True)
+    bases_25x = merged_df['Bases_covered_25x'].sum(skipna=True)
+    bases_30x = merged_df['Bases_covered_30x'].sum(skipna=True)
+
+    # Total loci in genome � assume same for all rows (take first non-null)
+    total_loci_vals = merged_df['Total_loci_in_Genome'].dropna()
+    total_loci = total_loci_vals.iloc[0] if not total_loci_vals.empty else 'NA'
+
+    # ---- 5. Build summary dictionary (keep colons in keys for final output) ----
     summary = {
         "Biosample_id": sample_id,
-        "Total_loci_in_Genome": merged_df["Total_loci_in_Genome"].unique()[0] if len(merged_df) > 0 else 'NA',
+        "Total_loci_in_Genome": total_loci,
         "Total_number_of_bases_aligned:": total_bases_aligned,
         "Total_number_of_bases:": total_bases,
         "Average_autosomal_coverage:": avg_auto_cov,
@@ -124,12 +185,12 @@ def compute_sample_summary(merged_df, verify_data, sample_id):
         "Percent_autosome_coverage_at_20X:": pct_20x,
         "Percent_autosome_coverage_at_25X:": pct_25x,
         "Percent_autosome_coverage_at_30X:": pct_30x,
-        "Bases_covered_5x:": merged_df['Bases_covered_5x'].sum(),
-        "Bases_covered_10x:": merged_df['Bases_covered_10x'].sum(),
-        "Bases_covered_15x:": merged_df['Bases_covered_15x'].sum(),
-        "Bases_covered_20x:": merged_df['Bases_covered_20x'].sum(),
-        "Bases_covered_25x:": merged_df['Bases_covered_25x'].sum(),
-        "Bases_covered_30x:": merged_df['Bases_covered_30x'].sum(),
+        "Bases_covered_5x:": bases_5x,
+        "Bases_covered_10x:": bases_10x,
+        "Bases_covered_15x:": bases_15x,
+        "Bases_covered_20x:": bases_20x,
+        "Bases_covered_25x:": bases_25x,
+        "Bases_covered_30x:": bases_30x,
         "VerifyBamID2_SNPS:": verify_data['#SNPS'],
         "VerifyBamID2_Average_Depth:": verify_data['AVG_DP'],
         "VerifyBamID2_Contamination:": verify_data['FREEMIX']
